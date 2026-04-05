@@ -216,8 +216,12 @@
     - name: Extract DB Passwords
       set_fact:
         # 정규식: DB_PASSWORD='값' 에서 값만 추출
-        db_password: "{{ infra_env_content | regex_search('DB_PASSWORD=[\\'\"]?([^\\'\"]+)', '\\1') | first }}"
-        semaphore_db_pass: "{{ infra_env_content | regex_search('SEMAPHORE_DB_PASS=[\\'\"]?([^\\'\"]+)', '\\1') | first }}"
+        #
+        #db_password: "{{ infra_env_content | regex_search('DB_PASSWORD=[\\'\"]?([^\\'\"]+\\$)', '\\1') | first }}"
+        #semaphore_db_pass: "{{ infra_env_content | regex_search('SEMAPHORE_DB_PASS=[\\'\"]?([^\\'\"]+\\$)', '\\1') | first }}"
+        db_password: "{{ infra_env_content | regex_search('(?m)^DB_PASSWORD=[\\x22\\x27]?(.*?)[\\x22\\x27]?$', '\\1') | first }}"
+        semaphore_db_pass: "{{ infra_env_content | regex_search('(?m)^SEMAPHORE_DB_PASS=[\\x22\\x27]?(.*?)[\\x22\\x27]?$', '\\1') | first }}"
+
 
 
     # -------------------------------------------------------

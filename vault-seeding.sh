@@ -78,13 +78,11 @@ vault kv put secret/infra/env \
   DB_HOST='postgres' \
   DB_NAME='netbox' \
   DB_USER='netbox' \
-  DB_PASSWORD='NETBOX_PASSWD' \
+  DB_PASSWORD='NETBOX' \
   REDIS_HOST='redis' \
   REDIS_PORT='6379' \
   SECRET_KEY="$GENERATED_SECRET_KEY" \
-  ALLOWED_HOSTS='*' \
-
-
+  ALLOWED_HOSTS='*'
 
 if [ $? -eq 0 ]; then
   echo "✅ 성공: 환경변수 데이터가 저장되었습니다."

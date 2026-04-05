@@ -10,8 +10,8 @@ Type=simple
 WorkingDirectory={{ base_dir }}
 Environment="XDG_RUNTIME_DIR=/run/user/{{ service_uid }}"
 Environment="PODMAN_SYSTEMD_UNIT=%n"
-ExecStart=/usr/local/bin/podman-compose up
-ExecStop=/usr/local/bin/podman-compose down
+ExecStart=/usr/bin/podman-compose up
+ExecStop=/usr/bin/podman-compose down
 Restart=always
 TimeoutStartSec=300
 

@@ -57,17 +57,16 @@ template {
 {{ with secret "secret/data/infra/env" }}
 # PostgreSQL Common
 POSTGRES_USER=postgres
-POSTGRES_PASSWORD='{{ .Data.data.DB_ROOT_PASS }}'
+POSTGRES_PASSWORD=PGPASSWD
 DB_HOST=postgres
 
 # NetBox
 DB_WAIT_DEBUG=1
 DB_NAME=netbox
 DB_USER=netbox
-DB_PASSWORD='{{ .Data.data.DB_PASSWORD }}'
 REDIS_HOST=redis
 REDIS_PORT=6379
-SECRET_KEY='{{ .Data.data.SECRET_KEY }}'
+SECRET_KEY=REDISKEY000000000000000000000000000000000000000000
 ALLOWED_HOSTS='*'
 {% endraw %}
 # [중요] Ansible 변수({{ domain_root }})를 쓰기 위해 raw 블록을 잠시 닫습니다.
@@ -76,11 +75,12 @@ CSRF_TRUSTED_ORIGINS='https://netbox.{{ domain_root }}'
 {% raw %}
 # Semaphore
 SEMAPHORE_DB_USER=semaphore
-SEMAPHORE_DB_PASS='{{ .Data.data.SEMAPHORE_DB_PASS }}'
-SEMAPHORE_DB_NAME=semaphore
+SEMAPHORE_DB_PASS=semaphore
 {% endraw %}
 # [중요] Ansible 변수 재사용
 SEMAPHORE_ADMIN_email='admin@{{ domain_root }}'
+DB_PASSWORD="NETBOX"
+SEMAPHORE_DB_NAME="semaphore"
 {% raw %}
 {{ end }}
 EOH
