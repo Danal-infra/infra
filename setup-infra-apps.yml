@@ -18,7 +18,7 @@
     img_redis: "docker.io/library/redis:8-alpine"
     img_netbox: "docker.io/netboxcommunity/netbox:latest"
     img_nexus: "docker.io/sonatype/nexus3:latest"
-    img_semaphore: "semaphoreui/semaphore:latest"
+    img_semaphore: "docker.io/semaphoreui/semaphore:latest"
 
   tasks:
     # -------------------------------------------------------

@@ -21,12 +21,12 @@ infra_domains:
   ansible: "ansible.{{ domain_root }}"
 
 ansible_host_mapping:
-  backup:     "192.168.122.166"
-  vault1:     "192.168.122.103"
-  vault2:     "192.168.122.168"
-  vault3:     "192.168.122.6"
-  pcidss:     "192.168.122.73"
-  infra-app:  "192.168.122.180"
+  backup:     "192.168.122.32"
+  vault1:     "192.168.122.153"
+  vault2:     "192.168.122.9"
+  vault3:     "192.168.122.67"
+  pcidss:     "192.168.122.251"
+  infra-app:  "192.168.122.213"
 
 node_id_mapping:
   vault1: "node1"
