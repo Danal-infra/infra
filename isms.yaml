@@ -167,7 +167,9 @@
         name: nfs-server
         state: stopped
         enabled: no
-      when: "'nfs-server.service' in ansible_facts.services"
+      when: 
+        - "'nfs-server.service' in ansible_facts.services"
+        - "inventory_hostname not in groups.get('backup_serverss', [])"
       tags: ['SRV-2025-015', 'nfs']
 
     - name: "[SRV-2025-016] 1. 불필요한 RPC 서비스 중지 (rpcbind)"
@@ -175,9 +177,9 @@
         name: rpcbind
         state: stopped
         enabled: no
-      when: >
-        'rpcbind.service' in ansible_facts.services or
-        'rpcbind.socket' in ansible_facts.services
+      when: 
+        - "('rpcbind.service' in ansible_facts.services) or ('rpcbind.socket' in ansible_facts.services)"
+        - "inventory_hostname not in groups.get('backup_serverss', [])"
       tags: ['SRV-2025-016', 'rpc']
 
     - name: "[SRV-2025-021] 1. FTP 보안 설정(접근 IP 제어) 수동 점검 대상 안내"
