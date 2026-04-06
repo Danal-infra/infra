@@ -1,0 +1,37 @@
+# =============================================================================
+# /etc/chrony.conf
+# Managed by Ansible - Do not edit manually
+# =============================================================================
+
+# 1. Time Servers
+# -----------------------------------------------------------------------------
+# 내부 NTP 서버를 최우선으로 사용합니다. (IBURST: 빠른 초기 동기화)
+server {{ infra_ntp_server }} iburst
+
+# 2. Frequency & Time Correction
+# -----------------------------------------------------------------------------
+# 시스템 시계의 오차율을 기록하여 재부팅 시 보정
+driftfile /var/lib/chrony/drift
+
+# 처음 3번의 업데이트 동안 1.0초 이상 차이가 나면 시계를 즉시 조정(Step)
+makestep 1.0 3
+
+# 커널의 RTC(Real Time Clock) 동기화 활성화
+rtcsync
+
+# 3. Network & Security Settings (Hardening)
+# -----------------------------------------------------------------------------
+# [보안] 외부에서 이 서버를 NTP 서버로 사용하지 못하도록 포트 비활성화 (클라이언트 전용)
+# NTP 포트(123/udp)를 리스닝하지 않음
+port 0
+
+# [보안] 로컬호스트(127.0.0.1)에서만 chronyc 명령 제어 허용
+bindcmdaddress 127.0.0.1
+bindcmdaddress ::1
+cmdallow 127.0.0.1
+cmdallow ::1
+
+# 4. Logging
+# -----------------------------------------------------------------------------
+logdir /var/log/chrony
+log measurements statistics tracking

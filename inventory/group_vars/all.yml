@@ -50,3 +50,137 @@ vault_vip: "192.168.122.100"
 infra_ntp:
   server_1: "192.168.122.1"
   server_2: "192.168.122.1"
+
+
+
+# ==============================================================================
+# Global Infrastructure Variables
+# ==============================================================================
+
+# -------------------------------------------------------------------------
+# 1. 도메인 및 호스트 설정 (Hardening Playbook에서 미사용)
+# -------------------------------------------------------------------------
+# domain_root: "infra.lan"
+
+# infra_domains:
+#   vault: "vault.{{ domain_root }}"
+#   backup: "backup.{{ domain_root }}"
+
+# 서버 접속 정보 (IP 매핑)
+# ansible_host_mapping:
+#   vault1: "192.168.122.100"
+#   vault2: "192.168.122.101"
+#   vault3: "192.168.122.102"
+#   infra-app: "192.168.122.105"
+#   backup-svr: "192.168.122.200"
+#   pcidss: "192.168.122.201"
+
+# [매직 변수] 호스트별 IP 자동 할당 (인벤토리에서 처리하거나 필요시 주석 해제)
+# ansible_host: "{{ ansible_host_mapping[inventory_hostname] | default(omit) }}"
+# ansible_user: "root"
+
+# 서비스 IP (어플리케이션 연동용 - Hardening에서 미사용)
+# infra_ips:
+#   vault_srv: "{{ ansible_host_mapping['vault1'] }}"
+#   backup_srv: "{{ ansible_host_mapping['backup-svr'] }}"
+
+# -------------------------------------------------------------------------
+# 2. 인프라 공통 설정 (NTP, DNS, Repo, Network)
+# -------------------------------------------------------------------------
+# [PKG-01] YUM Repository 설정에 사용
+infra_repo_server: "192.168.200.65"
+
+# [LOG-02] NTP(Chrony) 설정에 사용
+infra_ntp_server: "192.168.200.164"
+
+# [NET-01] DNS(resolv.conf) 설정에 사용
+infra_dns_server: "8.8.8.8"
+
+# 네트워크 접근 제어 (CIDR)
+# [SSH-05] SSHD AllowUsers (Match Address) 설정에 사용
+infra_mgmt_cidr: "10.201.251.0/24"
+infra_svc_cidr: "10.201.0.0/16"
+
+# -------------------------------------------------------------------------
+# 3. 사용자 및 그룹 정의 (Identity Management)
+# -------------------------------------------------------------------------
+# [ACC] 그룹 생성 루프에 사용
+system_groups:
+  - { name: 'admins', gid: 2000 }
+  - { name: 'apps', gid: 2100 }
+  - { name: 'sftp_users', gid: 2200 }
+  - { name: 'operators', gid: 3000 }
+  - { name: 'wheel', gid: 10 }
+
+# [ACC] 사용자 생성 및 홈 디렉토리 권한 설정에 사용
+users_list:
+  # Service User
+  - name: services
+    uid: 2101
+    group: apps
+    shell: /sbin/nologin
+    create_home: yes
+    home: /home/service/
+    comment: "Daemon Runner"
+
+  # System Admin
+  - name: koam
+    uid: 2001
+    group: wheel
+    groups: admins
+    shell: /bin/bash
+    home: /home/admins/koam
+    password: "INSERT_PASSWORD_HERE"
+
+  # Deployer
+  - name: deployer
+    uid: 2102
+    group: apps
+    groups: operators
+    shell: /bin/bash
+    home: /home/admins/deployer
+    password: "INSERT_PASSWORD_HERE"
+
+  # SFTP User
+  - name: sftp-user
+    uid: 2201
+    group: sftp_users
+    shell: /sbin/nologin
+    create_home: no
+    home: /home/service/sftp/upload
+
+  # Operators
+  - name: wasd
+    uid: 3001
+    group: operators
+    groups: operators
+    shell: /bin/bash
+    home: /home/operators/wasd
+    password: "INSERT_PASSWORD_HERE"
+
+  - name: imadmin
+    uid: 2002
+    group: admins
+    groups: wheel
+    shell: /bin/bash
+    home: /home/admins/imadmin
+    password: "INSERT_PASSWORD_HERE"
+
+# -------------------------------------------------------------------------
+# 4. 보안 강화 임계값 (Hardening Thresholds)
+# -------------------------------------------------------------------------
+# [ACC-05] 계정 잠금 정책 (faillock)에 사용
+auth_retries: 5
+auth_lock_time: 1800  # 30분
+
+# [SYS-08] 차단할 파일시스템 목록 설정에 사용
+unused_filesystems:
+  - cramfs
+  - freevxfs
+  - jffs2
+  - hfs
+  - hfsplus
+  - hfs
+  - hfsplus
+  - squashfs
+  - udf

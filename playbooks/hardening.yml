@@ -887,6 +887,18 @@
       tags: [identity]
 
     # [변경점] global_infrastructure.yml에 정의된 users_list 사용
+    - name: "[ACC] 사용자 패스워드 해시 생성 (Localhost Openssl 사용)"
+      ansible.builtin.set_fact:
+        user_hashes: "{{ user_hashes | default({}) | combine({ item.name: lookup('pipe', 'openssl passwd -6 ' + item.password | quote) }) }}"
+      loop: "{{ users_list }}"
+      when: 
+        - item.password is defined
+        - item.password not in ["!", "INSERT_PASSWORD_HERE"]
+      delegate_to: localhost
+      run_once: true
+      no_log: true
+      tags: [identity]
+
     - name: "[ACC] 사용자 생성"
       user:
         name: "{{ item.name }}"
@@ -896,7 +908,7 @@
         shell: "{{ item.shell }}"
         home: "{{ item.home }}"
         create_home: "{{ item.create_home | default('yes') }}"
-        password: "{{ item.password | default(omit) }}"
+        password: "{{ user_hashes[item.name] | default(item.password | default(omit)) }}"
         comment: "{{ item.comment | default(omit) }}"
         state: present
       loop: "{{ users_list }}"
