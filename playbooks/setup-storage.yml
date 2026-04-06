@@ -1,0 +1,67 @@
+- name: Setup Centralized Backup Storage
+  hosts: backup
+  become: yes
+  vars:
+    # [변수 기본값 설정] group_vars가 로드되지 않았을 경우를 대비한 안전장치
+    # 실제로는 group_vars/all.yml의 값이 우선합니다.
+    nfs_root: "/vol/backup"
+    # [중요] NFS 접속 허용 대역 (보안을 위해 * 사용 금지)
+    nfs_allowed_network: "192.168.122.0/24"
+
+  tasks:
+    # 1. NFS 유틸리티 설치 (필수)
+    - name: Install NFS Utilities
+      dnf:
+        name: nfs-utils
+        state: present
+
+    # 2. 서비스 시작
+    - name: Enable and Start NFS Server
+      systemd:
+        name: nfs-server
+        state: started
+        enabled: yes
+
+    # 3. 디렉토리 생성 (변수 사용)
+    - name: Ensure Backup Root Directory Exists
+      file:
+        path: "{{ nfs_root }}"
+        state: directory
+        mode: '0755'
+        owner: nobody
+        group: nobody
+
+    # 4. [Security Fix] 잘못된 레거시 설정(* 허용) 제거
+    # 아까 실수로 들어간 '/var/backup *' 라인을 삭제합니다.
+    - name: Remove insecure legacy export (/var/backup)
+      lineinfile:
+        path: /etc/exports
+        regexp: '^/var/backup'
+        state: absent
+      notify: reload nfs
+
+    # 5. [변수 적용] NFS Exports 설정
+    # 정규표현식을 사용하여 중복 추가를 방지하고, 특정 대역만 허용합니다.
+    - name: Configure NFS Exports with Variables
+      lineinfile:
+        path: /etc/exports
+        regexp: "^{{ nfs_root }}"
+        line: "{{ nfs_root }} {{ nfs_allowed_network }}(rw,sync,no_root_squash,no_all_squash)"
+        create: yes
+      notify: reload nfs
+
+    # 6. 방화벽 설정 (NFS 관련 서비스 모두 허용)
+    - name: Allow NFS Services in Firewall
+      firewalld:
+        service: "{{ item }}"
+        permanent: yes
+        state: enabled
+        immediate: yes
+      loop:
+        - nfs
+        - rpc-bind
+        - mountd
+
+  handlers:
+    - name: reload nfs
+      command: exportfs -ra

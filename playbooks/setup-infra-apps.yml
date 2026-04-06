@@ -1,0 +1,304 @@
+---
+- name: Setup Infrastructure Applications (Traefik, NetBox, Nexus, Semaphore)
+  hosts: infra-svr # 또는 특정 앱 서버 그룹 (예: infra_nodes)
+  become: yes
+  vars:
+    # [기본 설정]
+    service_user: "infra-svc"
+    service_uid: "1001"
+    base_dir: "/opt/infra"
+    domain_root: "infra.lan"
+    
+    # [Vault 설정]
+    vault_addr: "https://{{ infra_domains.vault | default('vault.infra.lan') }}:8200"
+    
+    # [컨테이너 이미지 버전 관리]
+    img_traefik: "docker.io/library/traefik:v3.6.6"
+    img_postgres: "docker.io/library/postgres:18"
+    img_redis: "docker.io/library/redis:8-alpine"
+    img_netbox: "docker.io/netboxcommunity/netbox:latest"
+    img_nexus: "docker.io/sonatype/nexus3:latest"
+    img_semaphore: "docker.io/semaphoreui/semaphore:latest"
+
+  tasks:
+    # -------------------------------------------------------
+    # 1. 시스템 계정 및 필수 패키지 설정
+    # -------------------------------------------------------
+    - name: Create Service User (infra-svc)
+      user:
+        name: "{{ service_user }}"
+        uid: "{{ service_uid }}"
+        shell: /sbin/nologin
+        create_home: yes
+        state: present
+
+    - name: Add vault user to infra-svc group
+      user:
+        name: vault
+        groups: "{{ service_user }}"
+        append: yes
+      when: service_user is defined
+
+    - name: Enable Linger for Rootless Podman
+      command: loginctl enable-linger {{ service_user }}
+      args:
+        creates: "/var/lib/systemd/linger/{{ service_user }}"
+
+    - name: Install EPEL Release
+      dnf:
+        name: epel-release
+        state: present
+
+    - name: Install Dependencies (DNF)
+      dnf:
+        name:
+          - podman
+          - podman-docker
+          - podman-compose
+          - acl # ACL 필수
+          - firewalld
+          - systemd-container # [FIX] machinectl 사용을 위해 추가
+          - slirp4netns # Rootless networking
+        state: present
+
+    - name: Allow Unprivileged Ports (80/443)
+      copy:
+        dest: /etc/sysctl.d/99-podman-ports.conf
+        content: "net.ipv4.ip_unprivileged_port_start=80"
+      notify: Apply Sysctl
+
+    # -------------------------------------------------------
+    # 2. 방화벽 설정
+    # -------------------------------------------------------
+    - name: Open Firewall Ports
+      firewalld:
+        port: "{{ item }}"
+        permanent: yes
+        state: enabled
+        immediate: yes
+      loop:
+        - 80/tcp
+        - 443/tcp
+        - 8080/tcp # treafik 
+        - 8081/tcp # Nexus Console
+        - 8082/tcp # Nexus Docker
+        - 8083/tcp # NetBox Direct
+        - 3000/tcp # Semaphore
+
+    # -------------------------------------------------------
+    # 3. 디렉토리 구조 생성
+    # -------------------------------------------------------
+    - name: Create Base Directories
+      file:
+        path: "{{ base_dir }}/{{ item }}"
+        state: directory
+        owner: "{{ service_user }}"
+        group: "{{ service_user }}"
+        mode: '0755'
+      loop:
+        - config/traefik
+        - config/semaphore
+        - config/prometheus
+        - config/grafana
+        - data/postgres-18
+        - data/postgres-init
+        - data/postgres-backup
+        - data/redis
+        - data/nexus-data
+        - data/netbox-media
+        - data/semaphore
+
+    # -------------------------------------------------------
+    # [NEW] Podman 스토리지 설정 (홈 디렉토리 용량 부족 해결)
+    # -------------------------------------------------------
+    - name: Create Podman Custom Storage Directory
+      file:
+        path: "{{ base_dir }}/storage"
+        state: directory
+        owner: "{{ service_user }}"
+        group: "{{ service_user }}"
+        mode: '0700'
+
+    - name: Ensure Podman Config Directory Exists
+      file:
+        path: "/home/{{ service_user }}/.config/containers"
+        state: directory
+        owner: "{{ service_user }}"
+        group: "{{ service_user }}"
+        mode: '0700'
+
+    - name: Configure Podman Storage Path
+      copy:
+        dest: "/home/{{ service_user }}/.config/containers/storage.conf"
+        owner: "{{ service_user }}"
+        group: "{{ service_user }}"
+        mode: '0644'
+        content: |
+          [storage]
+          driver = "overlay"
+          graphroot = "{{ base_dir }}/storage"
+
+    - name: Configure Podman Networking (Use slirp4netns)
+      copy:
+        dest: "/home/{{ service_user }}/.config/containers/containers.conf"
+        owner: "{{ service_user }}"
+        group: "{{ service_user }}"
+        mode: '0644'
+        content: |
+          [network]
+          default_rootless_network_cmd = "slirp4netns"
+
+    - name: Create ACME JSON for Traefik
+      file:
+        path: "{{ base_dir }}/config/traefik/acme.json"
+        state: touch
+        owner: "{{ service_user }}"
+        group: "{{ service_user }}"
+        mode: '0600'
+
+    # -------------------------------------------------------
+    # 4. Vault Agent 연동 (Secrets & Certs)
+    # -------------------------------------------------------
+    - name: Update Vault Agent Config for Apps
+      template:
+        src: templates/vault-agent-app.hcl.j2
+        dest: /etc/vault.d/agent.hcl
+        owner: vault
+        group: vault
+        mode: '0640'
+      notify: Restart Vault Agent
+
+    - name: Ensure Vault Generated Directory Exists
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ service_user }}" # Owner is infra-svc
+        group: "{{ service_user }}"
+        mode: '0750'
+      loop:
+        - "{{ base_dir }}/config/certs"
+
+    - name: Grant ACL to vault user for writing secrets
+      acl:
+        path: "{{ item }}"
+        entity: vault
+        etype: user
+        permissions: rwx
+        state: present
+      loop:
+        - "{{ base_dir }}/config"
+        - "{{ base_dir }}/config/certs"
+    
+    # [핵심 변경] Vault Agent가 파일을 생성할 때까지 대기
+    # 핸들러가 실행되기 전이라도 즉시 재시작하여 파일을 생성하도록 유도
+    - name: Ensure Vault Agent is restarted immediately
+      systemd:
+        name: vault-agent
+        state: restarted
+      
+    - name: Wait for infra.env to be populated
+      wait_for:
+        path: "{{ base_dir }}/config/infra.env"
+        timeout: 180 # Increased timeout to 180 seconds
+        search_regex: "DB_PASSWORD="
+
+    # [핵심 변경] 원격 서버의 infra.env 파일을 읽어옴 (Slurp)
+    - name: Read generated infra.env from remote host
+      slurp:
+        src: "{{ base_dir }}/config/infra.env"
+      register: slurp_infra_env
+
+    # [핵심 변경] 파일 내용 파싱하여 변수로 등록
+    - name: Parse passwords from infra.env
+      set_fact:
+        infra_env_content: "{{ slurp_infra_env.content | b64decode }}"
+    
+    - name: Extract DB Passwords
+      set_fact:
+        # 정규식: DB_PASSWORD='값' 에서 값만 추출
+        #
+        #db_password: "{{ infra_env_content | regex_search('DB_PASSWORD=[\\'\"]?([^\\'\"]+\\$)', '\\1') | first }}"
+        #semaphore_db_pass: "{{ infra_env_content | regex_search('SEMAPHORE_DB_PASS=[\\'\"]?([^\\'\"]+\\$)', '\\1') | first }}"
+        db_password: "{{ infra_env_content | regex_search('(?m)^DB_PASSWORD=[\\x22\\x27]?(.*?)[\\x22\\x27]?$', '\\1') | first }}"
+        semaphore_db_pass: "{{ infra_env_content | regex_search('(?m)^SEMAPHORE_DB_PASS=[\\x22\\x27]?(.*?)[\\x22\\x27]?$', '\\1') | first }}"
+
+
+
+    # -------------------------------------------------------
+    # 5. 설정 파일 배포 (Traefik, Compose, SQL)
+    # -------------------------------------------------------
+    - name: Deploy Traefik Dynamic Config
+      template:
+        src: templates/traefik-dynamic.yaml.j2
+        dest: "{{ base_dir }}/config/traefik/dynamic.yaml"
+        owner: "{{ service_user }}"
+        group: "{{ service_user }}"
+        mode: '0644'
+      notify: Restart Infra Stack
+
+    - name: Deploy DB Init SQL (Dynamic)
+      template:
+        src: templates/postgres-init.sql.j2
+        dest: "{{ base_dir }}/data/postgres-init/init.sql"
+        owner: "{{ service_user }}"
+        group: "{{ service_user }}"
+        mode: '0644'
+
+    - name: Deploy Prometheus Config
+      template:
+        src: templates/prometheus.yml.j2
+        dest: "{{ base_dir }}/config/prometheus/prometheus.yml"
+        owner: "{{ service_user }}"
+        group: "{{ service_user }}"
+        mode: '0644'
+      notify: Restart Infra Stack
+
+    - name: Deploy Podman Compose File
+      template:
+        src: templates/infra-compose.yml.j2
+        dest: "{{ base_dir }}/docker-compose.yml"
+        owner: "{{ service_user }}"
+        group: "{{ service_user }}"
+        mode: '0644'
+      notify: Restart Infra Stack
+
+    # -------------------------------------------------------
+    # 6. 서비스 등록 및 실행
+    # -------------------------------------------------------
+    - name: Create Systemd Service for Podman Compose
+      template:
+        src: templates/infra-stack.service.j2
+        dest: /etc/systemd/system/infra-stack.service
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Reload Systemd
+
+    - name: Enable Podman Socket for User
+      # [FIX] machinectl 패키지가 설치되었으므로 정상 실행 예상됨
+      command: machinectl shell {{ service_user }}@.host /usr/bin/systemctl --user enable --now podman.socket
+      changed_when: false
+
+    - name: Start Infra Stack
+      systemd:
+        name: infra-stack
+        state: started
+        enabled: yes
+
+  handlers:
+    - name: Apply Sysctl
+      command: sysctl --system
+
+    - name: Reload Systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: Restart Vault Agent
+      systemd:
+        name: vault-agent
+        state: restarted
+
+    - name: Restart Infra Stack
+      systemd:
+        name: infra-stack
+        state: restarted

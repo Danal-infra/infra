@@ -1,0 +1,39 @@
+---
+- name: Execute Manual ReaR Backup (OS Disaster Recovery)
+  hosts: infra-svr # 백업할 대상 그룹 (예: all 또는 web_servers 등)
+  become: yes
+  gather_facts: no  # 팩트 수집 생략으로 속도 향상
+
+  tasks:
+    # -------------------------------------------------------
+    # 1. ReaR 백업 실행 (mkbackup = mkrescue + mkbackuponly)
+    # -------------------------------------------------------
+    - name: Run 'rear mkbackup' (This may take a few minutes)
+      command: /usr/sbin/rear -v mkbackup
+      register: rear_output
+      # 백업 시간이 길어질 경우를 대비해 타임아웃 넉넉히 설정 (기본은 무제한이나 SSH 타임아웃 고려)
+      async: 1800  # 30분 (대형 OS 이미지 고려)
+      poll: 10     # 10초마다 상태 확인
+
+    # -------------------------------------------------------
+    # 2. 결과 요약 출력
+    # -------------------------------------------------------
+    - name: Show Backup Summary
+      debug:
+        msg: 
+          - "Status: Backup Completed Successfully"
+          - "Host: {{ inventory_hostname }}"
+          # 표준 출력의 마지막 5줄을 보여주어 결과 확인 (ISO 생성 크기 등)
+          - "Last Logs: {{ rear_output.stdout_lines[-5:] }}"
+      when: rear_output.rc == 0
+
+    # -------------------------------------------------------
+    # 3. 실패 시 로그 경로 안내
+    # -------------------------------------------------------
+    - name: Show Error Log Location on Failure
+      debug:
+        msg: 
+          - "Status: Backup FAILED"
+          - "Check log file at: /var/log/rear/"
+          - "Error Output: {{ rear_output.stderr_lines }}"
+      when: rear_output.rc != 0

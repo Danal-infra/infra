@@ -1,0 +1,37 @@
+---
+- name: Setup ReaR and Etckeeper
+  hosts: clients
+  become: yes
+  vars:
+    rear_nfs_url: "nfs://{{ infra_domains.backup }}{{ nfs_os_path }}"
+  tasks:
+    # 1. EPEL 저장소 활성화 (Etckeeper 설치를 위해 필수)
+    - name: Install EPEL Release Repository
+      dnf:
+        name: epel-release
+        state: present
+
+    - name: Install Packages
+      dnf:
+        name: [rear, etckeeper, git, nfs-utils]
+        state: present
+
+    - name: Configure ReaR
+      copy:
+        dest: /etc/rear/local.conf
+        content: |
+          OUTPUT=ISO
+          OUTPUT_URL={{ rear_nfs_url }}
+          BACKUP=NETFS
+          BACKUP_URL={{ rear_nfs_url }}
+          NETFS_KEEP_OLD_BACKUP_COPY=2
+
+    - name: Initial Etckeeper Commit
+      shell: |
+        etckeeper init
+        etckeeper commit "Initial commit"
+      environment:
+        LANG: C
+      register: git_result
+      failed_when: "git_result.rc != 0 and 'nothing to commit' not in git_result.stdout"
+      changed_when: "git_result.rc == 0"

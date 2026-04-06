@@ -1,0 +1,148 @@
+---
+# ==============================================================================
+# Play 1: Vault 서버 설정 (정책 및 Role 생성)
+# 대상: Localhost (Ansible Control Node)
+# ==============================================================================
+- name: 1. Configure Vault Policy & AppRole
+  hosts: localhost
+  connection: local
+  gather_facts: yes
+  vars:
+    vault_addr: "https://{{ infra_domains.vault | default('vault.infra.lan') }}:8200"
+    vault_skip_verify: "true"
+    # 실행 시 -e "vault_token=..." 으로 주입받아야 함
+    vault_token: "{{ lookup('env', 'VAULT_TOKEN') | default(omit) }}"
+  
+  tasks:
+    - name: Fail if Vault Token is missing
+      fail:
+        msg: "ERROR: 'vault_token' is not defined. Please run with -e 'vault_token=...'"
+      when: vault_token is not defined or vault_token == ""
+
+    # [1] Ansible 실행 서버가 Vault 도메인을 알 수 있도록 등록
+    - name: Ensure Vault domain resolves on localhost
+      become: yes
+      lineinfile:
+        path: /etc/hosts
+        line: "{{ infra_ips.vault_srv | default('192.168.122.100') }} {{ infra_domains.vault | default('vault.infra.lan') }}"
+        state: present
+
+    # [2] AppRole 인증 엔진 활성화
+    - name: Enable AppRole Auth Method
+      command: vault auth enable approle
+      environment: &vault_env
+        VAULT_ADDR: "{{ vault_addr }}"
+        VAULT_SKIP_VERIFY: "{{ vault_skip_verify }}"
+        VAULT_TOKEN: "{{ vault_token }}"
+      register: auth_enable
+      failed_when: 
+        - auth_enable.rc != 0 
+        - "'path is already in use' not in auth_enable.stderr"
+      changed_when: auth_enable.rc == 0
+
+    # [3] 정책(Policy) 생성 - 핵심: infra.env 읽기 권한 부여
+    - name: Create 'infra-read-only' Policy
+      copy:
+        dest: /tmp/infra-policy.hcl
+        content: |
+          # [핵심] infra.env 환경변수 읽기 권한
+          # KV v2 엔진은 실제 데이터가 'data/' 하위에 있으므로 경로 주의
+          path "secret/data/infra/env" {
+            capabilities = ["read"]
+          }
+          
+          # 그 외 인프라 관련 비밀 읽기 (확장성)
+          path "secret/data/infra/*" {
+            capabilities = ["read", "list"]
+          }
+
+          # 인증서 읽기
+          path "secret/data/certs/*" {
+            capabilities = ["read", "list"]
+          }
+      changed_when: false
+
+    - name: Apply Policy to Vault
+      command: vault policy write infra-read-only /tmp/infra-policy.hcl
+      environment: *vault_env
+
+    # [4] AppRole 생성 및 설정
+    # - token_policies: 위에서 만든 정책 연결
+    # - token_ttl: 토큰 기본 수명 (1시간)
+    # - token_max_ttl: 최대 갱신 가능 시간 (24시간 -> 이후 재인증 필요)
+    # - secret_id_ttl: 0 (무제한) -> SecretID가 만료되지 않도록 설정하여 "계속" 사용 가능하게 함
+    - name: Create/Update AppRole 'infra-role'
+      command: >
+        vault write auth/approle/role/infra-role
+        token_policies="infra-read-only"
+        token_ttl=1h
+        token_max_ttl=24h
+        secret_id_ttl=0
+      environment: *vault_env
+
+# ==============================================================================
+# Play 2: 자격 증명 배포
+# 대상: Vault 클러스터를 제외한 모든 클라이언트 서버
+# ==============================================================================
+- name: 2. Distribute RoleID & SecretID to Servers
+  hosts: all:!vault_cluster
+  become: yes
+  vars:
+    vault_addr: "https://{{ infra_domains.vault | default('vault.infra.lan') }}:8200"
+    vault_skip_verify: "true"
+    vault_token: "{{ lookup('env', 'VAULT_TOKEN') | default(omit) }}"
+
+  tasks:
+    # -------------------------------------------------------
+    # 1. Role ID 가져오기 (모든 서버 공통)
+    # -------------------------------------------------------
+    - name: Fetch Role ID from Vault
+      command: vault read -field=role_id auth/approle/role/infra-role/role-id
+      delegate_to: localhost
+      register: role_id_out
+      run_once: yes
+      environment: *vault_env
+
+    # -------------------------------------------------------
+    # 2. Secret ID 발급 (서버마다 개별 발급)
+    # -------------------------------------------------------
+    - name: Generate New Secret ID for Target Host
+      command: vault write -f -field=secret_id auth/approle/role/infra-role/secret-id
+      delegate_to: localhost
+      register: secret_id_out
+      environment: *vault_env
+
+    # -------------------------------------------------------
+    # 3. 파일 배포 (/etc/vault.d/)
+    # -------------------------------------------------------
+    - name: Ensure Vault Config Directory Exists
+      file:
+        path: /etc/vault.d
+        state: directory
+        mode: '0750'
+        owner: vault
+        group: vault
+
+    - name: Deploy Role ID
+      copy:
+        content: "{{ role_id_out.stdout }}"
+        dest: /etc/vault.d/role_id
+        mode: '0600'
+        owner: vault
+        group: vault
+
+    - name: Deploy Secret ID
+      copy:
+        content: "{{ secret_id_out.stdout }}"
+        dest: /etc/vault.d/secret_id
+        mode: '0600'
+        owner: vault
+        group: vault
+      notify: Restart Vault Agent
+
+  handlers:
+    - name: Restart Vault Agent
+      systemd:
+        name: vault-agent
+        state: restarted
+      ignore_errors: yes

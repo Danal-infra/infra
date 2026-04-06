@@ -1,0 +1,72 @@
+---
+- name: Setup Vault Agent on Clients
+  hosts: all:!vault_cluster # Vault 서버 자체를 제외한 모든 클라이언트
+  become: yes
+  vars:
+    vault_version: "1.21.1"
+    vault_addr: "https://{{ infra_domains.vault | default('vault.infra.lan') }}:8200"
+    vault_agent_config_dir: "/etc/vault.d"
+
+  tasks:
+    # [NEW] 0. 필수 유틸리티 설치 (dnf-plugins-core)
+    - name: Install DNF plugins core
+      dnf:
+        name: dnf-plugins-core
+        state: present
+
+    # [NEW] 0. HashiCorp 리포지토리 추가
+    - name: Add HashiCorp Repo
+      command: dnf config-manager --add-repo https://rpm.releases.hashicorp.com/RHEL/hashicorp.repo
+      args:
+        creates: /etc/yum.repos.d/hashicorp.repo
+
+    # 1. Vault 설치
+    - name: Install Vault Package
+      dnf:
+        name: vault
+        state: present
+      ignore_errors: yes # [FIX] 이미 설치되어 있으면 에러 무시 (Transaction check error 방지)
+
+    # 2. Agent 구성 디렉토리 생성
+    - name: Create Vault Agent Configuration Directory
+      file:
+        path: "{{ vault_agent_config_dir }}"
+        state: directory
+        owner: vault
+        group: vault
+        mode: '0750'
+
+    # 3. Agent 설정 파일 배포 (템플릿)
+    - name: Configure Vault Agent (agent.hcl)
+      template:
+        src: templates/vault-agent.hcl.j2
+        # [FIX] 오타 수정: {{ vault_agent_config_dir पली }} -> {{ vault_agent_config_dir }}
+        dest: "{{ vault_agent_config_dir }}/agent.hcl"
+        owner: vault
+        group: vault
+        mode: '0640'
+      notify: Restart Vault Agent
+
+    # 4. Systemd 서비스 등록 (Agent 전용)
+    - name: Create Vault Agent Systemd Service
+      template:
+        src: templates/vault-agent.service.j2
+        dest: /etc/systemd/system/vault-agent.service
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Restart Vault Agent
+
+    # 5. 서비스 시작
+    - name: Enable and Start Vault Agent
+      systemd:
+        name: vault-agent
+        state: started
+        enabled: yes
+
+  handlers:
+    - name: Restart Vault Agent
+      systemd:
+        name: vault-agent
+        state: restarted
+        daemon_reload: yes

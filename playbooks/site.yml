@@ -1,0 +1,16 @@
+---
+# Master Playbook for Infrastructure Provisioning
+
+# 1. 공통 설정 적용 (Base, NTP, OS Hardening)
+- name: Apply Common Configuration
+  hosts: all
+  become: yes
+  roles:
+    - common
+
+# 2. Vault 클러스터 구축
+- name: Configure Vault Cluster
+  hosts: vault_cluster
+  become: yes
+  roles:
+    - vault

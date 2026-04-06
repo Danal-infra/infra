@@ -1,0 +1,64 @@
+---
+- name: Post-Hardening Security Compliance Check
+  hosts: all
+  become: yes
+  gather_facts: yes
+  vars:
+    min_password_length: "12"
+    session_timeout: "900"
+
+  tasks:
+    # [1] SSH 설정 점검
+    - name: CHECK | SSH Root Login Restricted
+      command: grep "^PermitRootLogin prohibit-password" /etc/ssh/sshd_config
+      register: ssh_root_check
+      changed_when: false
+      failed_when: false
+
+    - name: CHECK | SSH Max Auth Tries
+      command: grep "^MaxAuthTries 3" /etc/ssh/sshd_config
+      register: ssh_auth_check
+      changed_when: false
+      failed_when: false
+
+    # [2] 패스워드 정책 점검
+    - name: CHECK | Password Minimum Length
+      command: grep "^minlen = {{ min_password_length }}" /etc/security/pwquality.conf
+      register: pwd_len_check
+      changed_when: false
+      failed_when: false
+
+    # [3] 세션 타임아웃 점검
+    - name: CHECK | Global Shell Timeout
+      command: grep "TMOUT={{ session_timeout }}" /etc/profile.d/timeout.sh
+      register: timeout_check
+      changed_when: false
+      failed_when: false
+
+    # [4] Auditd 서비스 상태 점검
+    - name: CHECK | Auditd Service Status
+      systemd:
+        name: auditd
+      register: auditd_svc_check
+      failed_when: false
+
+    # [5] Audit 규칙 점검
+    - name: CHECK | Active Audit Rules (Kernel)
+      command: /sbin/auditctl -l
+      register: audit_rules_active
+      changed_when: false
+      failed_when: false
+
+    # [6] 결과 요약 리포트 (에러 방지 로직 적용)
+    - name: REPORT | Security Compliance Summary
+      debug:
+        msg:
+          - "---------------------------------------------------"
+          - "HOST: {{ inventory_hostname }}"
+          - "SSH Root Restricted: {{ 'PASS' if (ssh_root_check.rc is defined and ssh_root_check.rc == 0) else 'FAIL' }}"
+          - "SSH Max Auth (3): {{ 'PASS' if (ssh_auth_check.rc is defined and ssh_auth_check.rc == 0) else 'FAIL' }}"
+          - "Password Len (12): {{ 'PASS' if (pwd_len_check.rc is defined and pwd_len_check.rc == 0) else 'FAIL' }}"
+          - "Session Timeout (900s): {{ 'PASS' if (timeout_check.rc is defined and timeout_check.rc == 0) else 'FAIL' }}"
+          - "Auditd Running: {{ 'PASS' if (auditd_svc_check.status is defined and auditd_svc_check.status.ActiveState == 'active') else 'FAIL' }}"
+          - "Audit Rules Loaded: {{ 'PASS' if (audit_rules_active.stdout is defined and 'audit_cmds' in audit_rules_active.stdout) else 'FAIL' }}"
+          - "---------------------------------------------------"

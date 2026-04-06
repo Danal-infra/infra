@@ -1,0 +1,1168 @@
+---
+- name: Integrated Security Hardening & Configuration (PCI-DSS v4.0 & ISMS-P Compliant)
+  hosts: all
+  become: yes
+
+  # [변경점] 외부 변수 파일 로드
+  vars_files:
+    - inventory/group_vars/all.yml
+
+  tasks:
+    # =========================================================================
+    # [사전 작업] 서비스 설치 여부 수집
+    # =========================================================================
+    - name: "[사전 작업] 시스템 내 설치된 서비스 목록 수집 (존재하는 서비스만 조치하기 위함)"
+      ansible.builtin.service_facts:
+      tags: ['always']
+
+    # =========================================================================
+    # [네트워크 및 서비스 설정 보안]
+    # =========================================================================
+    - name: "[SRV-2025-001] 1. 취약한 SNMP 커뮤니티 스트링(public) 비활성화"
+      ansible.builtin.replace:
+        path: /etc/snmp/snmpd.conf
+        regexp: '^(.*)\bpublic\b(.*)$'
+        replace: '# \g<1>public\g<2>  # ISMS-P 조치: 기본 커뮤니티 스트링(public) 제한'
+      notify: Disabled snmpd
+      when: "'snmpd.service' in ansible_facts.services"
+      tags: ['SRV-2025-001', 'snmp']
+
+    - name: "[SRV-2025-001] 2. 취약한 SNMP 커뮤니티 스트링(private) 비활성화"
+      ansible.builtin.replace:
+        path: /etc/snmp/snmpd.conf
+        regexp: '^(.*)\bprivate\b(.*)$'
+        replace: '# \g<1>private\g<2>  # ISMS-P 조치: 기본 커뮤니티 스트링(private) 제한'
+      notify: Disabled snmpd
+      when: "'snmpd.service' in ansible_facts.services"
+      tags: ['SRV-2025-001', 'snmp']
+
+    - name: "[SRV-2025-004] 1. 불필요한 SMTP 서비스 실행 비활성화"
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: stopped
+        enabled: no
+      loop:
+        - postfix
+        - sendmail
+      when: "item + '.service' in ansible_facts.services"
+      tags: ['SRV-2025-004', 'smtp']
+
+    - name: "[SRV-2025-005] 1. Postfix disable_vrfy_command 설정 적용"
+      ansible.builtin.lineinfile:
+        path: /etc/postfix/main.cf
+        regexp: '^#?disable_vrfy_command\s*='
+        line: 'disable_vrfy_command = yes'
+        state: present
+      notify: Reload postfix
+      when: "'postfix.service' in ansible_facts.services"
+      tags: ['SRV-2025-005', 'smtp']
+
+    - name: "[SRV-2025-006] 1. Postfix debug_peer_level 설정 적용 (최소 2 유지)"
+      ansible.builtin.lineinfile:
+        path: /etc/postfix/main.cf
+        regexp: '^#?debug_peer_level\s*='
+        line: 'debug_peer_level = 2'
+        state: present
+      notify: Reload postfix
+      when: "'postfix.service' in ansible_facts.services"
+      tags: ['SRV-2025-006', 'smtp']
+
+    - name: "[SRV-2025-007] 1. Postfix 패키지 보안 업데이트 (설치된 경우에만 수행)"
+      ansible.builtin.dnf:
+        name: postfix
+        state: latest
+      when: "'postfix.service' in ansible_facts.services"
+      tags: ['SRV-2025-007', 'smtp']
+
+    - name: "[SRV-2025-008] 1. Postfix message_size_limit 적용"
+      ansible.builtin.lineinfile:
+        path: /etc/postfix/main.cf
+        regexp: '^#?message_size_limit\s*='
+        line: 'message_size_limit = 10485760'  # 10MB
+        state: present
+      notify: Reload postfix
+      when: "'postfix.service' in ansible_facts.services"
+      tags: ['SRV-2025-008', 'smtp']
+
+    - name: "[SRV-2025-008] 2. Postfix smtpd_recipient_limit 적용"
+      ansible.builtin.lineinfile:
+        path: /etc/postfix/main.cf
+        regexp: '^#?smtpd_recipient_limit\s*='
+        line: 'smtpd_recipient_limit = 100'  # 100명
+        state: present
+      notify: Reload postfix
+      when: "'postfix.service' in ansible_facts.services"
+      tags: ['SRV-2025-008', 'smtp']
+
+    - name: "[SRV-2025-009] 1. Postfix Relay 제어 정책 적용"
+      ansible.builtin.lineinfile:
+        path: /etc/postfix/main.cf
+        regexp: '^#?smtpd_relay_restrictions\s*='
+        line: 'smtpd_relay_restrictions = permit_mynetworks, permit_sasl_authenticated, defer_unauth_destination'
+        state: present
+      notify: Reload postfix
+      when: "'postfix.service' in ansible_facts.services"
+      tags: ['SRV-2025-009', 'smtp']
+
+    - name: "[SRV-2025-010] 1. /usr/sbin/postsuper others 실행 권한 제거"
+      ansible.builtin.file:
+        path: /usr/sbin/postsuper
+        mode: 'u=rwx,g=rx,o=r'
+      when: "'postfix.service' in ansible_facts.services"
+      tags: ['SRV-2025-010', 'smtp']
+
+    - name: "[SRV-2025-011] 1. FTP 보안 설정 파일에 root 접속 차단 추가"
+      ansible.builtin.lineinfile:
+        path: "{{ item }}"
+        line: 'root'
+        state: present
+        create: yes
+      loop:
+        - /etc/vsftpd/ftpusers
+        - /etc/vsftpd/user_list
+      when: "'vsftpd.service' in ansible_facts.services"
+      tags: ['SRV-2025-011', 'ftp']
+
+    - name: "[SRV-2025-012] 1. 시스템 내 .netrc 파일 검색"
+      ansible.builtin.find:
+        paths: /
+        patterns: '.netrc'
+        hidden: yes
+        file_type: file
+      register: netrc_files
+      tags: ['SRV-2025-012', 'files']
+
+    - name: "[SRV-2025-012] 2. 정책 위반 .netrc 파일 삭제"
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ netrc_files.files }}"
+      when: netrc_files.matched > 0
+      tags: ['SRV-2025-012', 'files']
+
+    - name: "[SRV-2025-013] 1. vsftpd anonymous_enable=NO 설정 확인 및 적용"
+      ansible.builtin.lineinfile:
+        path: /etc/vsftpd/vsftpd.conf
+        regexp: '^#?anonymous_enable\s*='
+        line: 'anonymous_enable=NO'
+        state: present
+      notify: Restart vsftpd
+      when: "'vsftpd.service' in ansible_facts.services"
+      tags: ['SRV-2025-013', 'ftp']
+
+    - name: "[SRV-2025-013] 2. 불필요한 ftp 시스템 계정 제거"
+      ansible.builtin.user:
+        name: ftp
+        state: absent
+      tags: ['SRV-2025-013', 'ftp']
+
+    - name: "[SRV-2025-014] 1. NFS exports 설정 파일 권한 및 소유자 강화"
+      ansible.builtin.file:
+        path: /etc/exports
+        owner: root
+        group: root
+        mode: '0644'
+      when: "'nfs-server.service' in ansible_facts.services"
+      tags: ['SRV-2025-014', 'nfs']
+
+    - name: "[SRV-2025-015] 1. NFS 관련 서비스 중지 및 비활성화"
+      ansible.builtin.service:
+        name: nfs-server
+        state: stopped
+        enabled: no
+      when: 
+        - "'nfs-server.service' in ansible_facts.services"
+        - "inventory_hostname not in groups.get('backup_serverss', [])"
+      tags: ['SRV-2025-015', 'nfs']
+
+    - name: "[SRV-2025-016] 1. 불필요한 RPC 서비스 중지 (rpcbind)"
+      ansible.builtin.service:
+        name: rpcbind
+        state: stopped
+        enabled: no
+      when: 
+        - "('rpcbind.service' in ansible_facts.services) or ('rpcbind.socket' in ansible_facts.services)"
+        - "inventory_hostname not in groups.get('backup_serverss', [])"
+      tags: ['SRV-2025-016', 'rpc']
+
+    - name: "[SRV-2025-021] 1. FTP 보안 설정(접근 IP 제어) 수동 점검 대상 안내"
+      ansible.builtin.debug:
+        msg: >
+          Rocky Linux 10에서는 tcp_wrapper(hosts.allow) 패키지를 지원하지 않습니다. 
+          따라서 firewalld 혹은 네트워크 방화벽을 통해 FTP 서비스(21/tcp) 접근이 임의의 사용자에게 허용되지 않도록 수동 점검하시기 바랍니다.
+      tags: ['SRV-2025-021', 'ftp']
+
+    # =========================================================================
+    # [계정 및 패스워드 관리 보안]
+    # =========================================================================
+    - name: "[SRV-2025-022] 1. 패스워드 미설정된 계정 조회 (nologin, false 등 시스템 계정 제외)"
+      ansible.builtin.shell:
+        cmd: |
+          awk -F: 'NR==FNR { if ($7 !~ /(nologin|false|sync|halt|shutdown)$/) users[$1]=1; next } ($1 in users) && ($2 == "" || $2 == "!") && $1 != "root" && $1 != "bin" {print $1}' /etc/passwd /etc/shadow
+      register: empty_password_users
+      changed_when: false
+      ignore_errors: true
+      tags: ['SRV-2025-022', 'account']
+
+    - name: "[SRV-2025-022] 2. 정책 위반 계정 발견 안내 (Fail 처리)"
+      ansible.builtin.fail:
+        msg: "취약점 조치 필요: 다음 계정들에 암호가 설정되지 않았습니다 -> {{ empty_password_users.stdout_lines }}"
+      when: empty_password_users.stdout_lines | length > 0
+      tags: ['SRV-2025-022', 'account']
+
+    - name: "[SRV-2025-025] 1. /etc/hosts.equiv 파일 존재 여부 확인"
+      ansible.builtin.stat:
+        path: /etc/hosts.equiv
+      register: hostsequiv_stat
+      tags: ['SRV-2025-025', 'rhosts']
+
+    - name: "[SRV-2025-025] 2. /etc/hosts.equiv 내 '+' 기호 설정 제거"
+      ansible.builtin.replace:
+        path: /etc/hosts.equiv
+        regexp: '^\s*\+\s*.*$'
+        replace: '# \g<0>  # ISMS-P 조치: 신뢰 기반 설정(+) 차단'
+      when: hostsequiv_stat.stat.exists
+      tags: ['SRV-2025-025', 'rhosts']
+
+    - name: "[SRV-2025-025] 3. root 홈 디렉토리 내 .rhosts 설정 제거"
+      ansible.builtin.file:
+        path: /root/.rhosts
+        state: absent
+      tags: ['SRV-2025-025', 'rhosts']
+
+    - name: "[SRV-2025-026] 1. SSH root 직접 로그인 차단 (PermitRootLogin no)"
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PermitRootLogin'
+        line: 'PermitRootLogin no'
+        state: present
+      notify: Restart sshd
+      tags: ['SRV-2025-026', 'sshd']
+
+    - name: "[SRV-2025-027] 1. OS 기본 방화벽(firewalld) 상태 점검 (설치된 경우에만)"
+      ansible.builtin.service:
+        name: firewalld
+        state: started
+        enabled: yes
+      when: "'firewalld.service' in ansible_facts.services"
+      tags: ['SRV-2025-027', 'firewall']
+
+    - name: "[SRV-2025-028] 1. /etc/profile.d/tmout.sh 파일 설정 배포 (세션 타임아웃)"
+      ansible.builtin.copy:
+        dest: /etc/profile.d/tmout.sh
+        content: |
+          if [ "$TMOUT" != "300" ]; then
+            TMOUT=300
+          fi
+          export TMOUT
+          readonly TMOUT
+        owner: root
+        group: root
+        mode: '0644'
+      tags: ['SRV-2025-028', 'session']
+
+    # =========================================================================
+    # [불필요 서비스 및 웹/DNS 보안]
+    # =========================================================================
+    - name: "[SRV-2025-034] 1. 불필요한 서비스 autofs 중지/비활성화"
+      ansible.builtin.service:
+        name: autofs
+        state: stopped
+        enabled: no
+      when: "'autofs.service' in ansible_facts.services"
+      ignore_errors: yes
+      tags: ['SRV-2025-034', 'services']
+
+    - name: "[SRV-2025-035] 1. 레거시(취약한) 데몬 비활성화"
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: stopped
+        enabled: no
+      loop:
+        - tftp
+        - talk
+        - ntalk
+        - finger
+        - rsh
+        - rlogin
+        - rexec
+        - ypserv
+        - ypbind
+      when: >
+        (item + '.service' in ansible_facts.services) or
+        (item + '.socket' in ansible_facts.services)
+      ignore_errors: yes
+      tags: ['SRV-2025-035', 'services']
+
+    - name: "[SRV-2025-037] 1. 일반 FTP 데몬(vsftpd, proftpd) 동작 중지"
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: stopped
+        enabled: no
+      loop:
+        - vsftpd
+        - proftpd
+      when: "item + '.service' in ansible_facts.services"
+      ignore_errors: yes
+      tags: ['SRV-2025-037', 'ftp']
+
+    - name: "[SRV-2025-040] 1. httpd.conf 옵션에서 Indexes 지시자 제거 처리"
+      ansible.builtin.replace:
+        path: /etc/httpd/conf/httpd.conf
+        regexp: '(?i)(^\s*Options\s+.*)\bIndexes\b(.*)$'
+        replace: '\1\2'
+      notify: Restart httpd
+      when: "'httpd.service' in ansible_facts.services"
+      tags: ['SRV-2025-040', 'apache']
+
+    - name: "[SRV-2025-042] 1. HTTP 웹 데몬(httpd) 패키지 보안 최신 배포"
+      ansible.builtin.dnf:
+        name: httpd
+        state: latest
+      when: "'httpd.service' in ansible_facts.services"
+      tags: ['SRV-2025-042', 'apache']
+
+    - name: "[SRV-2025-043] 1. Apache 기본 제공 매뉴얼 및 cgi-bin 디렉터리 삭제"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/www/manual
+        - /var/www/cgi-bin
+      when: "'httpd.service' in ansible_facts.services"
+      tags: ['SRV-2025-043', 'apache']
+
+    - name: "[SRV-2025-044] 1. HTTP 웹 Root에 LimitRequestBody(5MB) 용량 제한 삽입"
+      ansible.builtin.lineinfile:
+        path: /etc/httpd/conf/httpd.conf
+        insertbefore: '</Directory>'
+        line: '    LimitRequestBody 5000000'
+        state: present
+      when: "'httpd.service' in ansible_facts.services"
+      tags: ['SRV-2025-044', 'apache']
+
+    - name: "[SRV-2025-045] 1. User 및 Group을 apache로 강제/점검"
+      ansible.builtin.replace:
+        path: /etc/httpd/conf/httpd.conf
+        regexp: '^(User|Group) (root|\w+)$'
+        replace: '\1 apache'
+      notify: Restart httpd
+      when: "'httpd.service' in ansible_facts.services"
+      tags: ['SRV-2025-045', 'apache']
+
+    - name: "[SRV-2025-046] 1. DocumentRoot가 루트(/)로 할당된 경우 기본 경로로 강제"
+      ansible.builtin.replace:
+        path: /etc/httpd/conf/httpd.conf
+        regexp: '^(\s*DocumentRoot\s+)["'']?/["'']?\s*$'
+        replace: '\1 "/var/www/html"'
+      notify: Restart httpd
+      when: "'httpd.service' in ansible_facts.services"
+      tags: ['SRV-2025-046', 'apache']
+
+    - name: "[SRV-2025-047] 1. httpd.conf Options 내 FollowSymLinks 제거"
+      ansible.builtin.replace:
+        path: /etc/httpd/conf/httpd.conf
+        regexp: '(?i)(^\s*Options\s+.*)\bFollowSymLinks\b(.*)$'
+        replace: '\1\2'
+      notify: Restart httpd
+      when: "'httpd.service' in ansible_facts.services"
+      tags: ['SRV-2025-047', 'apache']
+
+    - name: "[SRV-2025-048] 1. 미사용 웹 서비스(데몬) 정지 및 비활성"
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: stopped
+        enabled: no
+      loop:
+        - httpd
+        - nginx
+        - tomcat
+      when: "item + '.service' in ansible_facts.services"
+      ignore_errors: yes
+      tags: ['SRV-2025-048', 'apache', 'nginx', 'tomcat']
+
+    - name: "[SRV-2025-060] 1. 시스템 내 tomcat-users.xml 기본 패스워드 검사"
+      ansible.builtin.shell: 
+        cmd: "grep -iE 'password=\"(tomcat|admin|manager)\"' /etc/tomcat*/tomcat-users.xml /opt/tomcat*/conf/tomcat-users.xml"
+      register: tomcat_default_pw_check
+      failed_when: false
+      changed_when: false
+      ignore_errors: yes
+      tags: ['SRV-2025-060', 'tomcat']
+
+    - name: "[SRV-2025-060] 2. Tomcat 정책 위반 발견 시 실패 처리"
+      ansible.builtin.fail:
+        msg: "취약점 조치 필요: Tomcat 기본 계정 패스워드가 기본값으로 설정되어 있습니다."
+      when: 
+        - tomcat_default_pw_check.rc == 0
+        - tomcat_default_pw_check.stdout != ""
+      tags: ['SRV-2025-060', 'tomcat']
+
+    - name: "[SRV-2025-062] 1. named.conf options 내 version 정보 가림 절차 적용"
+      ansible.builtin.lineinfile:
+        path: /etc/named.conf
+        insertafter: '^\s*options\s*\{'
+        line: '        version "none";'
+        state: present
+      notify: Restart named
+      when: "'named.service' in ansible_facts.services"
+      tags: ['SRV-2025-062', 'dns']
+
+    - name: "[SRV-2025-063] 1. named.conf 내 recursion 제한 (기본 no 설정 유도)"
+      ansible.builtin.replace:
+        path: /etc/named.conf
+        regexp: '^\s*recursion\s+yes;'
+        replace: '        recursion no;  # ISMS-P 조치: 불필요한 Recursive Query 차단'
+      notify: Restart named
+      when: "'named.service' in ansible_facts.services"
+      tags: ['SRV-2025-063', 'dns']
+
+    - name: "[SRV-2025-064] 1. OS 기본 bind 패키지 최신 버전 업데이트 보장"
+      ansible.builtin.dnf:
+        name: bind
+        state: latest
+      when: "'named.service' in ansible_facts.services"
+      tags: ['SRV-2025-064', 'dns']
+
+    - name: "[SRV-2025-066] 1. named.conf options 단에 allow-transfer 비활성화 구문 삽입"
+      ansible.builtin.lineinfile:
+        path: /etc/named.conf
+        insertafter: '^\s*options\s*\{'
+        line: '        allow-transfer { none; };'
+        state: present
+      notify: Restart named
+      when: "'named.service' in ansible_facts.services"
+      tags: ['SRV-2025-066', 'dns']
+
+    # =========================================================================
+    # [계정 정책 및 권한 관리 보안]
+    # =========================================================================
+    - name: "[SRV-2025-069] 1. 패스워드 최대 사용 기간 90일 제한 (신규 계정 적용)"
+      ansible.builtin.lineinfile:
+        path: /etc/login.defs
+        regexp: '^#?PASS_MAX_DAYS'
+        line: 'PASS_MAX_DAYS   90'
+        state: present
+      tags: ['SRV-2025-069', 'account']
+
+    - name: "[SRV-2025-069] 2. pwquality.conf 패스워드 최소 길이 및 복잡도 적용"
+      ansible.builtin.lineinfile:
+        path: /etc/security/pwquality.conf
+        regexp: "^{{ item.key }}"
+        line: "{{ item.key }} = {{ item.value }}"
+        state: present
+      loop:
+        - { key: 'minlen', value: '8' }
+        - { key: 'dcredit', value: '-1' }
+        - { key: 'ucredit', value: '-1' }
+        - { key: 'lcredit', value: '-1' }
+        - { key: 'ocredit', value: '-1' }
+      tags: ['SRV-2025-069', 'account']
+
+    - name: "[SRV-2025-070] 1. login.defs 내 ENCRYPT_METHOD SHA512 이상 보장"
+      ansible.builtin.lineinfile:
+        path: /etc/login.defs
+        regexp: '^#?ENCRYPT_METHOD'
+        line: 'ENCRYPT_METHOD SHA512'
+        state: present
+      tags: ['SRV-2025-070', 'account']
+
+    - name: "[SRV-2025-073] 1. /etc/group 내 root 그룹 계정 점검"
+      ansible.builtin.shell: 
+        cmd: "awk -F: '$1==\"root\" {print $4}' /etc/group"
+      register: root_group_members
+      changed_when: false
+      tags: ['SRV-2025-073', 'account']
+
+    - name: "[SRV-2025-073] 2. 관리자 그룹 예외 계정 발견 시 실패 안내"
+      ansible.builtin.fail:
+        msg: "취약점 조치 필요: root 그룹에 불필요한 사용자({{ root_group_members.stdout }})가 포함되어 있습니다."
+      when: 
+        - root_group_members.stdout != ""
+        - root_group_members.stdout != "root"
+      tags: ['SRV-2025-073', 'account']
+
+    - name: "[SRV-2025-074] 1. 기존 계정 중 패스워드 만료일 90일 초과 사용자 추출 (nologin, false 등 제외)"
+      ansible.builtin.shell:
+        cmd: |
+          awk -F: 'NR==FNR { if ($7 !~ /(nologin|false|sync|halt|shutdown)$/) users[$1]=1; next } ($1 in users) && ($2 != "*" && $2 != "!" && $2 != "!!" && $5 > 90) {print $1}' /etc/passwd /etc/shadow
+      register: unmanaged_users
+      changed_when: false
+      ignore_errors: true
+      tags: ['SRV-2025-074', 'account']
+
+    - name: "[SRV-2025-074] 2. 패스워드 미갱신 기존 계정 90일 만료 기간 자동 적용"
+      ansible.builtin.command: "chage -M 90 {{ item }}"
+      loop: "{{ unmanaged_users.stdout_lines }}"
+      when: unmanaged_users.stdout_lines | length > 0
+      tags: ['SRV-2025-074', 'account']
+
+    - name: "[SRV-2025-075] 1. 취약한 패스워드 사용 여부 (수동 점검 안내)"
+      ansible.builtin.debug:
+        msg: >
+          본 항목(SRV-2025-075)은 사내 패스워드에 계정명/기관명이 포함되거나 유추하기 쉬운 단어가 등재되어있는지 
+          담당자가 인터뷰 및 비밀번호 변경 캠페인을 통해 수동 진단해야 합니다.
+      tags: ['SRV-2025-075', 'account']
+
+    - name: "[SRV-2025-081] 1. cron/at 제어 파일 존재 여부 확인"
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      register: cron_files
+      loop:
+        - /etc/cron.allow
+        - /etc/cron.deny
+        - /etc/at.allow
+        - /etc/at.deny
+      tags: ['SRV-2025-081', 'cron', 'perms']
+
+    - name: "[SRV-2025-081] 2. cron/at 제어 파일 권한 640 이하, 소유자 root 조치"
+      ansible.builtin.file:
+        path: "{{ item.stat.path }}"
+        owner: root
+        group: root
+        mode: '0640'
+      loop: "{{ cron_files.results }}"
+      when: item.stat.exists
+      tags: ['SRV-2025-081', 'cron', 'perms']
+
+    - name: "[SRV-2025-082] 1. 시스템 주요 루트 디렉터리의 소유자 root 및 o-w 권한 보장"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: root
+        mode: 'o-w'
+      loop:
+        - /usr
+        - /bin
+        - /sbin
+        - /etc
+        - /var
+      ignore_errors: yes
+      tags: ['SRV-2025-082', 'perms']
+
+    - name: "[SRV-2025-083] 1. 시스템 초기화 디렉터리 내 others 쓰기 권한 제거"
+      ansible.builtin.shell: 
+        cmd: "chmod -R o-w /etc/rc* /etc/init* /usr/sbin/init* 2>/dev/null"
+      changed_when: false
+      ignore_errors: yes
+      tags: ['SRV-2025-083', 'perms']
+
+    - name: "[SRV-2025-084] 1. 계정/단말/서비스 관련 주요 파일 존재 여부 확인"
+      ansible.builtin.stat:
+        path: "{{ item.path }}"
+      register: sys_files
+      loop:
+        - { path: '/etc/passwd', mode: '0644' }
+        - { path: '/etc/shadow', mode: '0600' }
+        - { path: '/etc/hosts', mode: '0644' }
+        - { path: '/etc/rsyslog.conf', mode: '0644' }
+        - { path: '/etc/services', mode: '0644' }
+        - { path: '/etc/hosts.lpd', mode: '0640' }
+      tags: ['SRV-2025-084', 'perms']
+
+    - name: "[SRV-2025-084] 2. 계정/단말/서비스 관련 주요 파일 권한 할당"
+      ansible.builtin.file:
+        path: "{{ item.item.path }}"
+        owner: root
+        mode: "{{ item.item.mode }}"
+      loop: "{{ sys_files.results }}"
+      when: item.stat.exists
+      tags: ['SRV-2025-084', 'perms']
+
+    - name: "[SRV-2025-087] 1. gcc 및 cc 실행 파일 존재 여부 확인"
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      register: compiler_files
+      loop:
+        - /usr/bin/gcc
+        - /usr/bin/cc
+      tags: ['SRV-2025-087', 'perms']
+
+    - name: "[SRV-2025-087] 2. gcc 및 cc 실행 파일의 others 실행(x) 권한 박탈"
+      ansible.builtin.file:
+        path: "{{ item.stat.path }}"
+        mode: 'o-x'
+      loop: "{{ compiler_files.results }}"
+      when: item.stat.exists
+      tags: ['SRV-2025-087', 'perms']
+
+    - name: "[SRV-2025-091] 1. 불필요한 유틸리티 SUID 강제 제거"
+      ansible.builtin.shell: 
+        cmd: "chmod -s {{ item }} 2>/dev/null"
+      loop:
+        - /sbin/dump
+        - /sbin/restore
+        - /sbin/unix_chkpwd
+        - /usr/bin/at
+        - /usr/bin/lpq
+        - /usr/bin/lpr
+        - /usr/bin/lprm
+        - /usr/bin/newgrp
+        - /usr/sbin/lpc
+      changed_when: false
+      ignore_errors: yes
+      tags: ['SRV-2025-091', 'perms']
+
+    - name: "[SRV-2025-092] 1. 일반 계정 홈 디렉터리에 대한 o-w 설정 적용"
+      ansible.builtin.shell: |
+        awk -F: '($3 >= 1000 && $6 != "/" && $6 != "/dev/null") {print $6}' /etc/passwd | while read HOMEDIR; do
+          if [ -d "$HOMEDIR" ]; then
+            chmod o-w "$HOMEDIR"
+          fi
+        done
+      changed_when: false
+      ignore_errors: yes
+      tags: ['SRV-2025-092', 'perms']
+
+    - name: "[SRV-2025-093] 1. 홈 디렉터리 기준 world writable 파일 강제 권한 회수 유도"
+      ansible.builtin.shell: |
+        HOMEDIRS=$(egrep -v 'nologin|false|sync|halt|shutdown' /etc/passwd | awk -F":" '{print $6}' | grep -v '^/$')
+        for dir in $HOMEDIRS; do
+          if [ -d "$dir" ]; then
+            find "$dir" -type f -perm -2 -exec chmod o-w {} \; 2>/dev/null
+          fi
+        done
+      changed_when: false
+      ignore_errors: yes
+      tags: ['SRV-2025-093', 'perms']
+
+    - name: "[SRV-2025-094] 1. /etc/cron 관련 하위 파일 others 쓰기(w) 권한 일괄 차단"
+      ansible.builtin.shell: 
+        cmd: "chmod -R o-w /etc/cron* 2>/dev/null"
+      changed_when: false
+      ignore_errors: yes
+      tags: ['SRV-2025-094', 'cron', 'perms']
+
+    - name: "[SRV-2025-095] 1. 소유자 불분명(nouser/nogroup) 파일 탐색 및 소유권 자동 복구"
+      ansible.builtin.shell: 
+        cmd: |
+          # 1. 시스템 주요 경로 및 가상 파일시스템 제외 (안전성 확보 및 탐색 속도 향상)
+          EXCLUDE_PATHS="-path /proc -prune -o -path /sys -prune -o -path /dev -prune -o -path /run -prune -o -path /tmp -prune -o -path /usr -prune -o -path /boot -prune -o -path /etc -prune -o -path /var/lib/containers -prune -o -path /var/lib/docker -prune -o -path /opt/infra/storage -prune -o -path /var/lib/containerd -prune -o -path /var/lib/kubelet -prune"
+          
+          # 2. 소유자/그룹이 없는 파일 및 디렉터리를 널(null) 문자로 구분하여 안전하게 검색
+          find / $EXCLUDE_PATHS -o \( -nouser -o -nogroup \) -print0 2>/dev/null | while IFS= read -r -d '' orphan; do
+            if [ ! -e "$orphan" ]; then continue; fi
+            
+            target_parent=$(dirname "$orphan")
+            
+            # 3. 차상위 디렉터리 탐색 (정상적인 소유자가 있는 부모 디렉터리를 찾을 때까지 상위로 이동)
+            while [ "$target_parent" != "/" ]; do
+              is_orphan=$(find "$target_parent" -maxdepth 0 \( -nouser -o -nogroup \) 2>/dev/null)
+              if [ -z "$is_orphan" ]; then
+                # 정상 소유자/그룹을 가진 디렉터리 발견 시 루프 탈출
+                break
+              fi
+              target_parent=$(dirname "$target_parent")
+            done
+            
+            # 4. 개별 소유권 적용 (재귀적용 -R 금지, 디렉터리와 파일 각각 독립적 적용)
+            # 심볼릭 링크인 경우 링크 자체의 소유권만 변경하기 위해 --no-dereference 사용
+            if [ "$target_parent" == "/" ]; then
+               chown --no-dereference root:root "$orphan"
+               echo " -> [Root Fallback] $orphan (root:root 적용)"
+            else
+               chown --no-dereference --reference="$target_parent" "$orphan"
+               echo " -> [Parent Match] $orphan (참조 부모: $target_parent)"
+            fi
+          done
+      register: orphan_recovery_result
+      changed_when: "'->' in orphan_recovery_result.stdout"
+      ignore_errors: true
+      tags: ['SRV-2025-095', 'perms']
+
+    - name: "[SRV-2025-095] 2. 소유권 자동 복구 결과 출력"
+      ansible.builtin.debug:
+        msg: "{{ orphan_recovery_result.stdout_lines }}"
+      when: 
+        - orphan_recovery_result.stdout is defined
+        - orphan_recovery_result.stdout != ""
+      tags: ['SRV-2025-095', 'perms']
+
+    - name: "[SRV-2025-096] 1. 사용자 쉘 초기화/환경 파일 타사용자 권한 전면 차단"
+      ansible.builtin.shell: |
+        HOMEDIRS=$(awk -F: '($3 >= 1000 && $6 != "/" && $6 != "/dev/null") {print $6}' /etc/passwd)
+        for dir in $HOMEDIRS; do
+          if [ -d "$HOMEDIR" ]; then
+            for envfile in .profile .login .kshrc .cshrc .bashrc .bash_profile .netrc; do
+              if [ -f "$dir/$envfile" ]; then
+                chmod o-rwx "$dir/$envfile"
+              fi
+            done
+          fi
+        done
+      changed_when: false
+      ignore_errors: yes
+      tags: ['SRV-2025-096', 'perms']
+
+    # =========================================================================
+    # [로그 및 시스템 환경 설정 보안]
+    # =========================================================================
+    - name: "[SRV-2025-108] 1. 주요 시스템 로그 파일 others 쓰기 권한 차단 검사"
+      ansible.builtin.shell: 
+        cmd: "find /var/log -type f -perm -o+w -exec chmod o-w {} + 2>/dev/null"
+      changed_when: false
+      ignore_errors: yes
+      tags: ['SRV-2025-108', 'logs']
+
+    - name: "[SRV-2025-109] 1. 시스템 주요 경고(emerg 등) 수집 보장 (rsyslog)"
+      ansible.builtin.lineinfile:
+        path: /etc/rsyslog.conf
+        line: "*.emerg                                                 :omusrmsg:*"
+        regexp: '^\\*.emerg'
+        state: present
+      notify: Restart rsyslog
+      tags: ['SRV-2025-109', 'logs']
+
+    - name: "[SRV-2025-112] 1. rsyslog.conf 내 cron 로깅 설정 존재 확보"
+      ansible.builtin.lineinfile:
+        path: /etc/rsyslog.conf
+        line: "cron.* /var/log/cron"
+        regexp: '^cron\\.\\*'
+        state: present
+      tags: ['SRV-2025-112', 'logs']
+
+    - name: "[SRV-2025-115] 1. 정기적 로그 리뷰 관리적 항목 알림"
+      ansible.builtin.debug:
+        msg: "본 항목(SRV-2025-115)은 wtmp, btmp, sulog 등을 툴(SIEM) 혹은 수동으로 정기 분석하여 보안 리포트를 생성하도록 권고합니다."
+      tags: ['SRV-2025-115', 'logs']
+
+    - name: "[SRV-2025-118] 1. 보안 패치 누락 여부 점검 (dnf check-update)"
+      ansible.builtin.shell:
+        cmd: "dnf check-update --security"
+      register: security_updates
+      changed_when: security_updates.rc == 100
+      failed_when: false
+      tags: ['SRV-2025-118', 'patch']
+      
+    - name: "[SRV-2025-118] 2. 누락된 보안 패치 정보 표출"
+      ansible.builtin.debug:
+        msg: "적용되지 않은 보안 패치가 존재합니다: {{ security_updates.stdout_lines }}"
+      when: security_updates.rc == 100
+      tags: ['SRV-2025-118', 'patch']
+
+    - name: "[SRV-2025-121] 1. /etc/profile 등 PATH 값 현재경로(.) 참조 점검"
+      ansible.builtin.shell: 
+        cmd: "grep -E '^PATH=.*(\\.:|::|:\\.$)' /etc/profile /etc/bashrc /root/.bash_profile /root/.bashrc 2>/dev/null"
+      register: root_path_check
+      changed_when: false
+      failed_when: false
+      ignore_errors: yes
+      tags: ['SRV-2025-121', 'env']
+
+    - name: "[SRV-2025-121] 2. 정책 위반 PATH 발견 시 실패 처리"
+      ansible.builtin.fail:
+        msg: "취약점 조치 필요: 루트 권한 PATH 환경변수에 안전하지 않은 현재 디렉터리(.) 참조가 포함되어 있습니다."
+      when: 
+        - root_path_check.rc == 0
+        - root_path_check.stdout != ""
+      tags: ['SRV-2025-121', 'env']
+
+    - name: "[SRV-2025-122] 1. /etc/login.defs UMASK 설정 상향 (022)"
+      ansible.builtin.lineinfile:
+        path: /etc/login.defs
+        regexp: '^#?UMASK\\s+'
+        line: 'UMASK           0027'
+        state: present
+      tags: ['SRV-2025-122', 'env']
+
+    - name: "[SRV-2025-122] 2. /etc/profile 등 umask 구문 추가 보장"
+      ansible.builtin.replace:
+        path: "{{ item }}"
+        regexp: '^umask\\s+00[0-2]'
+        replace: 'umask 0027'
+      loop:
+        - /etc/profile
+        - /etc/bashrc
+      ignore_errors: true
+      tags: ['SRV-2025-122', 'env']
+
+    - name: "[SRV-2025-127] 1. authselect으로 with-faillock 활성화"
+      ansible.builtin.shell: 
+        cmd: "authselect enable-feature with-faillock && authselect apply-changes"
+      changed_when: false
+      ignore_errors: yes
+      tags: ['SRV-2025-127', 'account']
+
+    - name: "[SRV-2025-127] 2. faillock.conf 에 5회 실패 시 600초 잠금 적용"
+      ansible.builtin.lineinfile:
+        path: /etc/security/faillock.conf
+        regexp: "^{{ item.regex }}"
+        line: "{{ item.line }}"
+        state: present
+      loop:
+        - { regex: '^#?\\s*deny\\s*=', line: 'deny = 5' }
+        - { regex: '^#?\\s*unlock_time\\s*=', line: 'unlock_time = 600' }
+        - { regex: '^#?\\s*silent', line: 'silent' }
+      tags: ['SRV-2025-127', 'account']
+    # =========================================================================
+    # 1. 네트워크 및 리포지토리 기초 설정
+    # =========================================================================
+    #    - name: "[NET-01] DNS 설정 보호 (NetworkManager)"
+    #      community.general.ini_file:
+    #        path: /etc/NetworkManager/conf.d/dns.conf
+    #        section: main
+    #        option: dns
+    #        value: none
+    #        mode: '0644'
+    #      notify: Restart NetworkManager
+    #
+    - name: "[NET-01] resolv.conf 불변 속성 해제"
+      ansible.builtin.command: "chattr -i /etc/resolv.conf"
+      ignore_errors: yes
+      changed_when: false
+      tags: [network]
+
+    - name: "[NET-01] resolv.conf 영구 설정 (불변 속성)"
+      ansible.builtin.copy:
+        dest: /etc/resolv.conf
+        content: |
+          # Generated by Ansible (Manual Mode)
+          nameserver {{ infra_dns_server }}
+        mode: '0644'
+      tags: [network]
+
+    - name: "[NET-01] resolv.conf 불변 속성 재설정"
+      ansible.builtin.command: "chattr +i /etc/resolv.conf"
+      changed_when: false
+      tags: [network]
+
+    #    - name: "[PKG-01] 기존 Repo 파일 백업 및 비활성화"
+    #      find:
+    #        paths: /etc/yum.repos.d
+    #        patterns: "*.repo"
+    #      register: repo_files
+    #
+    #    - name: "[PKG-01] 내부 YUM 저장소 적용"
+    #      replace:
+    #        path: "{{ item.path }}"
+    #        regexp: '^#?baseurl=http?://.*?(/\$releasever.*)$'
+    #        replace: 'baseurl=http://{{ infra_repo_server }}/repository/rocky\1'
+    #      loop: "{{ repo_files.files }}"
+    #      tags: [yum]
+    #
+    #    - name: "[NET-02] 레거시 프로토콜 및 불필요 서비스 제거"
+    #      dnf:
+    #        name:
+    #          - telnet-server
+    #          - rsh-server
+    #          - vsftpd
+    #          - tftp-server
+    #        state: absent
+    #      tags: [security, packages]
+      #
+
+    # =========================================================================
+    # 2. 패키지 설치
+    # =========================================================================
+    - name: "[PKG-02] 필수 보안 및 관리 도구 설치"
+      dnf:
+        name:
+          - "@Core"
+          - "@Security Tools"
+          - chrony
+          - yum-utils
+          - aide
+          - audit
+          - audit-libs
+          - scap-security-guide
+          - tuned
+          - vim
+          - rsync
+          - sysstat
+          - pciutils
+          - bind-utils
+          - tmux
+        state: present
+      tags: [packages]
+
+    # =========================================================================
+    # 3. 계정 관리 및 접근 제어
+    # =========================================================================
+    # [변경점] global_infrastructure.yml에 정의된 system_groups 사용
+    - name: "[ACC] 그룹 생성"
+      group:
+        name: "{{ item.name }}"
+        gid: "{{ item.gid }}"
+        state: present
+      loop: "{{ system_groups }}"
+      tags: [identity]
+
+    # [변경점] global_infrastructure.yml에 정의된 users_list 사용
+    - name: "[ACC] 사용자 생성"
+      user:
+        name: "{{ item.name }}"
+        uid: "{{ item.uid }}"
+        group: "{{ item.group }}"
+        groups: "{{ item.groups | default(omit) }}"
+        shell: "{{ item.shell }}"
+        home: "{{ item.home }}"
+        create_home: "{{ item.create_home | default('yes') }}"
+        password: "{{ item.password | default(omit) }}"
+        comment: "{{ item.comment | default(omit) }}"
+        state: present
+      loop: "{{ users_list }}"
+      tags: [identity]
+
+    - name: "[ACC-01] 사용자 홈 디렉토리 권한 설정 (0700)"
+      file:
+        path: "{{ item.home }}"
+        mode: '0700'
+        state: directory
+        owner: "{{ item.name }}"
+        group: "{{ item.group }}"
+      loop: "{{ users_list }}"
+      when: item.create_home | default(true)
+      tags: [identity]
+
+    - name: "[ACC-02] SFTP Chroot 구조 생성 (WAS/Web)"
+      block:
+        - file:
+            path: /home/service/sftp
+            state: directory
+            owner: root
+            group: root
+            mode: '0755'
+        - file:
+            path: /home/service/sftp/upload
+            state: directory
+            owner: sftp-user
+            group: sftp_users
+            mode: '0770'
+      when: "'was' in group_names or server_role | default('base') == 'was'"
+      tags: [sftp]
+
+    - name: "[ACC-03] Sudoers 권한 제한 (Deployer)"
+      copy:
+        dest: /etc/sudoers.d/deployer_policy
+        content: |
+          deployer ALL=(root) NOPASSWD: /usr/bin/systemctl start nginx, /usr/bin/systemctl stop nginx, /usr/bin/systemctl restart nginx
+          deployer ALL=(services) NOPASSWD: /usr/bin/cp, /usr/bin/mv, /usr/bin/rm, /usr/bin/tar
+        mode: '0440'
+        validate: 'visudo -cf %s'
+      tags: [sudo]
+
+    - name: "[ACC-04] 패스워드 정책 강화 (pwquality)"
+      copy:
+        dest: /etc/security/pwquality.conf
+        content: |
+          minlen = 12
+          minclass = 4
+          dcredit = -1
+          ucredit = -1
+          lcredit = -1
+          ocredit = -1
+          difok = 5
+          retry = 3
+      tags: [security, auth]
+
+
+
+
+
+
+
+    # =========================================================================
+    # 4. OS 보안 강화
+    # =========================================================================
+    #    - name: "[SYS-01/07] 커널 파라미터 보안 설정"
+    #      ansible.posix.sysctl:
+    #        name: "{{ item.key }}"
+    #        value: "{{ item.value }}"
+    #        state: present
+    #        reload: yes
+    #      loop:
+    #        - { key: 'net.ipv4.ip_forward', value: '0' }
+    #        - { key: 'net.ipv4.conf.all.accept_source_route', value: '0' }
+    #        - { key: 'net.ipv4.conf.all.accept_redirects', value: '0' }
+    #        - { key: 'net.ipv4.conf.all.log_martians', value: '1' }
+    #        - { key: 'net.ipv4.icmp_echo_ignore_broadcasts', value: '1' }
+    #        - { key: 'net.ipv4.tcp_syncookies', value: '1' }
+    #        - { key: 'kernel.randomize_va_space', value: '2' }
+    #        - { key: 'fs.suid_dumpable', value: '0' }
+    #      tags: [security, sysctl]
+
+      #    - name: "[SYS-07] 코어 덤프 하드 리미트 설정"
+      #      community.general.pam_limits:
+      #        domain: "*"
+      #        limit_type: hard
+      #        limit_item: core
+      #        value: 0
+      #      tags: [security]
+
+    - name: "[SYS-03] USB 스토리지 비활성화"
+      copy:
+        dest: /etc/modprobe.d/usb-storage.conf
+        content: "install usb-storage /bin/true"
+      tags: [security]
+
+    - name: "[SYS-08] 미사용 파일시스템 모듈 로딩 차단"
+      copy:
+        dest: /etc/modprobe.d/unused_filesystems.conf
+        content: |
+          {% for fs in unused_filesystems %}
+          install {{ fs }} /bin/true
+          {% endfor %}
+      tags: [security]
+
+
+
+        #    - name: "[SYS-05] SELinux 활성화"
+        #      selinux:
+        #        policy: targeted
+        #        state: enforcing
+        #      tags: [security]
+
+    - name: "[SYS-06] 시스템 경고 배너 설정"
+      copy:
+        dest: /etc/issue
+        content: |
+          ******************************************************************
+          * Authorized uses only. All activity may be monitored.           *
+          * 인가된 사용자만 접근 가능합니다.                               *
+          ******************************************************************
+      tags: [security]
+
+    - name: "[SYS-06] 시스템 경고 배너 설정 for net"
+      copy:
+        dest: /etc/issue.net
+        content: |
+          ******************************************************************
+          * Authorized uses only. All activity may be monitored.           *
+          * 인가된 사용자만 접근 가능합니다.                               *
+          ******************************************************************
+      tags: [security]
+
+    # =========================================================================
+    # 5. SSH 원격 접속 보안
+    # =========================================================================
+    - name: "[SSH-01~05] SSHD 설정 강화"
+      blockinfile:
+        path: /etc/ssh/sshd_config
+        block: |
+          # --- Global Hardening ---
+          PasswordAuthentication yes
+          PubkeyAuthentication yes
+          Protocol 2
+          MaxAuthTries 4
+          ClientAliveInterval 300
+          ClientAliveCountMax 0
+          Banner /etc/issue.net
+          Ciphers aes128-ctr,aes192-ctr,aes256-ctr,aes128-gcm@openssh.com,aes256-gcm@openssh.com
+          MACs hmac-sha2-256,hmac-sha2-512
+
+          #          # --- Network Binding Policies ---
+          #          Match Address {{ infra_mgmt_cidr }}
+          #              AllowUsers koam deployer imadmin
+          #
+          #          Match Address {{ infra_svc_cidr }}
+          #              AllowUsers sftp-user
+          #              ForceCommand internal-sftp -u 0022
+          #              ChrootDirectory /home/service/sftp
+          #              X11Forwarding no
+          #              AllowTcpForwarding no
+        validate: 'sshd -t -f %s'
+      notify: Restart sshd
+      tags: [security, ssh]
+
+    # =========================================================================
+    # 6. 로깅 및 감사
+    # =========================================================================
+    - name: "[LOG-01] PCI-DSS 감사 규칙 설정"
+      copy:
+        dest: /etc/audit/rules.d/pci-dss.rules
+        content: |
+          -w /etc/group -p wa -k identity
+          -w /etc/passwd -p wa -k identity
+          -w /etc/gshadow -p wa -k identity
+          -w /etc/shadow -p wa -k identity
+          -w /etc/security/opasswd -p wa -k identity
+          -w /etc/security/faillock.conf -p wa -k identity
+
+          -a always,exit -F arch=b64 -S adjtimex -S settimeofday -k time-change
+          -a always,exit -F arch=b64 -S clock_settime -k time-change
+          -w /etc/localtime -p wa -k time-change
+
+          -w /etc/issue -p wa -k system-locale
+          -w /etc/hosts -p wa -k system-locale
+          -w /etc/sysconfig/network -p wa -k system-locale
+
+          -w /var/log/lastlog -p wa -k logins
+          -w /var/run/faillock -p wa -k logins
+
+          -a always,exit -F arch=b64 -S execve -C uid!=euid -F euid=0 -k setuid
+      notify: Restart Auditd
+      tags: [security, audit]
+
+    - name: "[LOG-02] NTP 설정 (Chrony)"
+      template:
+        src: ../templates/chrony.conf.j2
+        dest: /etc/chrony.conf
+      vars:
+        content: |
+          server {{ infra_ntp_server }} iburst
+          driftfile /var/lib/chrony/drift
+          makestep 1.0 3
+          rtcsync
+          logdir /var/log/chrony
+      notify: Restart Chronyd
+      tags: [ntp]
+
+    - name: "[LOG-03] AIDE 초기화"
+      shell: |
+        if [ ! -f /var/lib/aide/aide.db.gz ]; then
+          aide --init
+          mv /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz
+        fi
+      tags: [security, aide]
+
+    - name: "[LOG-04] ClamAV 예약 검사"
+      cron:
+        name: "Scan SFTP uploads"
+        minute: "0"
+        hour: "3"
+        job: "/usr/bin/clamscan -r --remove /home/service/sftp/upload | logger -t clamav-scan"
+      when: "'was' in group_names"
+      tags: [av]
+
+  handlers:
+    - name: Disabled snmpd
+      ansible.builtin.service:
+        name: snmpd
+        state: stopped
+
+    - name: Reload postfix
+      ansible.builtin.service:
+        name: postfix
+        state: reloaded
+
+    - name: Restart vsftpd
+      ansible.builtin.service:
+        name: vsftpd
+        state: restarted
+
+    - name: Restart sshd
+      ansible.builtin.service:
+        name: sshd
+        state: restarted
+
+    - name: Restart httpd
+      ansible.builtin.service:
+        name: httpd
+        state: restarted
+
+    - name: Restart named
+      ansible.builtin.service:
+        name: named
+        state: restarted
+
+    - name: Restart rsyslog
+      ansible.builtin.service:
+        name: rsyslog
+        state: restarted
+
+    - name: Restart Chronyd
+      service: name=chronyd state=restarted enabled=yes
+    - name: Restart Auditd
+      shell: "/usr/sbin/augenrules --load"
+      ignore_errors: yes
+    - name: Restart NetworkManager
+      service: name=NetworkManager state=restarted

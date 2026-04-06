@@ -1,0 +1,13 @@
+---
+- name: Manage backup hosts in /etc/hosts
+  hosts: all
+  become: true
+  tasks:
+    - name: Insert or update Ansible managed backup hosts block
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} ANSIBLE MANAGED BACKUP HOSTS"
+        backup: true
+        block: |
+          172.20.2.137 STR-BAK-PBK00
+        state: present
